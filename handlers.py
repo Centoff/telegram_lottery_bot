@@ -6,10 +6,11 @@ from telegram.ext import ContextTypes
 from database import register_participant, has_participated_today, get_participants, save_draw, get_draw_history, get_user_stats, get_user_rewards, add_reward, get_total_draws, get_all_users, add_lottery_channel, get_lottery_channels, update_lottery_channel, delete_lottery_channel, add_prize, get_prizes, update_prize, delete_prize, get_active_prizes, add_auto_draw, get_auto_draws, update_auto_draw, mark_auto_draw_executed, increment_prize_usage
 from subscription_check import is_subscribed, check_all_subscriptions, get_user_subscription_status
 from inline_buttons import get_join_keyboard, get_channel_subscription_keyboard, get_webapp_keyboard, get_main_menu, get_admin_menu, get_admin_channel_menu, get_admin_prize_menu, get_admin_auto_draw_menu, get_channel_list_keyboard, get_prize_list_keyboard, get_auto_draw_list_keyboard
-from utils import generate_prize, format_datetime, get_user_level, get_prize_tier
+from utils import generate_prize, format_datetime, get_user_level, get_prize_tier, parse_datetime, is_past_datetime
 from config import TELEGRAM_CHANNELS, MAX_CHANNELS, ADMIN_CHAT_ID, PRIZE_AMOUNT
 import random
 import asyncio
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -340,31 +341,99 @@ async def all_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await query.edit_message_text(text)
 
-# === Новые обработчики для админ-панели ===
-
-async def admin_add_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логика добавления канала
-    pass
-
-async def admin_list_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логика отображения списка каналов
-    pass
-
-async def admin_add_prize_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логика добавления приза
-    pass
-
-async def admin_list_prizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логика отображения списка призов
-    pass
+# === Новые обработчики для автоматических розыгрышей ===
 
 async def admin_add_auto_draw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логика добавления автоматического розыгрыша
-    pass
+    query = update.callback_query
+    await query.answer()
+    
+    # Получаем активные призы для выбора
+    prizes = get_active_prizes()
+    
+    if not prizes:
+        await query.edit_message_text("❌ Нет активных призов для автоматического розыгрыша!\n"
+                                      "Сначала добавьте хотя бы один приз через /addprize")
+        return
+    
+    # Создаем клавиатуру с призами
+    keyboard = []
+    for prize in prizes:
+        id_, name, value = prize
+        keyboard.append([InlineKeyboardButton(f"{name} - {value}", callback_data=f"select_prize_{id_}")])
+    
+    keyboard.append([InlineKeyboardButton("Назад", callback_data="admin_auto_draws")])
+    
+    await query.edit_message_text(
+        "🎁 Выберите приз для автоматического розыгрыша:\n\n"
+        "Введите дату и время в формате: 2024-01-15 14:30",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-async def admin_list_auto_draws_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логика отображения списка автоматических розыгрышей
-    pass
+async def select_prize_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # Получаем ID приза из callback_data
+    prize_id = int(query.data.split("_")[2])
+    
+    # Сохраняем ID приза во временное хранилище (в реальной реализации лучше использовать session)
+    context.user_data['selected_prize_id'] = prize_id
+    
+    await query.edit_message_text(
+        f"✅ Приз выбран!\n"
+        f"Теперь введите дату и время розыгрыша в формате: 2024-01-15 14:30\n"
+        f"Пример: 2024-01-20 18:00"
+    )
+
+async def handle_auto_draw_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода даты и времени для автоматического розыгрыша"""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("Доступ ограничен.")
+        return
+    
+    # Получаем введенную дату
+    datetime_str = update.message.text.strip()
+    
+    # Проверяем формат даты
+    dt = parse_datetime(datetime_str)
+    
+    if not dt:
+        await update.message.reply_text("❌ Неверный формат даты. Используйте: 2024-01-15 14:30")
+        return
+    
+    # Проверяем, что дата не в прошлом
+    if is_past_datetime(datetime_str):
+        await update.message.reply_text("❌ Дата не может быть в прошлом!")
+        return
+    
+    # Проверяем, есть ли выбранный приз
+    prize_id = context.user_data.get('selected_prize_id')
+    
+    if not prize_id:
+        await update.message.reply_text("❌ Не выбран приз для розыгрыша!")
+        return
+    
+    try:
+        # Добавляем автоматический розыгрыш
+        add_auto_draw(datetime_str, prize_id)
+        
+        # Увеличиваем счетчик использования приза
+        increment_prize_usage(prize_id)
+        
+        await update.message.reply_text(
+            f"✅ Автоматический розыгрыш добавлен!\n\n"
+            f"📅 Дата и время: {datetime_str}\n"
+            f"🎁 Приз ID: {prize_id}"
+        )
+        
+        # Очищаем временное хранилище
+        context.user_data['selected_prize_id'] = None
+        
+    except Exception as e:
+        logger.error(f"Ошибка добавления автоматического розыгрыша: {e}")
+        await update.message.reply_text("❌ Ошибка при добавлении розыгрыша!")
 
 # === Обработчики для кнопок админ-панели ===
 
@@ -448,6 +517,12 @@ async def button_handler(update, context):
     
     elif query.data == "admin_auto_draws":
         await admin_auto_draws(query, context)
+    
+    elif query.data == "admin_add_auto_draw":
+        await admin_add_auto_draw_callback(query, context)
+    
+    elif query.data.startswith("select_prize_"):
+        await select_prize_callback(query, context)
 
 # === Добавим обработчик для команды добавления канала ===
 
@@ -492,3 +567,84 @@ async def add_prize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный формат. Используйте: Название | Значение")
     else:
         await update.message.reply_text("❌ Неверный формат. Используйте: Название | Значение")
+
+# === Добавим обработчик для команды добавления автоматического розыгрыша ===
+
+async def add_auto_draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        await update.message.reply_text("Доступ ограничен.")
+        return
+    
+    # Объяснение формата
+    await update.message.reply_text(
+        "Добавление автоматического розыгрыша:\n\n"
+        "1. Сначала выберите приз командой /addprize (если еще не добавлен)\n"
+        "2. Затем введите дату и время в формате: 2024-01-15 14:30\n"
+        "Пример: 2024-01-20 18:00\n\n"
+        "После этого будет создан автоматический розыгрыш на указанную дату и время."
+    )
+
+# === Добавим обработчик для проверки автоматических розыгрышей ===
+
+async def check_auto_draws():
+    """Функция для проверки и выполнения автоматических розыгрышей"""
+    try:
+        draws = get_auto_draws()
+        current_time = datetime.datetime.now()
+        
+        for draw in draws:
+            draw_id, draw_datetime_str, prize_id, is_active, executed = draw
+            
+            # Пропускаем неактивные или уже выполненные розыгрыши
+            if not is_active or executed:
+                continue
+            
+            # Парсим дату розыгрыша
+            draw_datetime = parse_datetime(draw_datetime_str)
+            
+            if draw_datetime and draw_datetime <= current_time:
+                # Выполняем розыгрыш
+                await execute_auto_draw(draw_id, prize_id)
+                
+    except Exception as e:
+        logger.error(f"Ошибка проверки автоматических розыгрышей: {e}")
+
+async def execute_auto_draw(draw_id: int, prize_id: int):
+    """Выполнение автоматического розыгрыша"""
+    try:
+        # Получаем участников
+        users = get_participants()
+        
+        if not users:
+            logger.warning("Нет участников для автоматического розыгрыша")
+            return
+        
+        # Выбираем случайного победителя
+        winner_id = random.choice(users)
+        winner = await context.bot.get_chat(winner_id)
+        
+        # Получаем приз
+        prizes = get_prizes()
+        prize_value = ""
+        for p in prizes:
+            if p[0] == prize_id:
+                prize_value = p[2]
+                break
+        
+        if not prize_value:
+            logger.error(f"Приз с ID {prize_id} не найден")
+            return
+        
+        # Сохраняем розыгрыш
+        save_draw(winner_id, prize_value, "auto", "auto")
+        
+        # Отмечаем как выполненный
+        mark_auto_draw_executed(draw_id)
+        
+        # Увеличиваем счетчик использования приза
+        increment_prize_usage(prize_id)
+        
+        logger.info(f"Автоматический розыгрыш выполнен! Победитель: {winner_id}, Приз: {prize_value}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка выполнения автоматического розыгрыша ID {draw_id}: {e}")

@@ -16,7 +16,7 @@ def generate_prize():
 def format_datetime(dt_str):
     """Форматирует дату для отображения"""
     try:
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
         return dt.strftime("%d.%m.%Y %H:%M")
     except:
         return dt_str
